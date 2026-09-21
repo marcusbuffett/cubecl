@@ -448,7 +448,7 @@ impl DeviceService for CudaServer {
         let policy = PitchedMemoryLayoutPolicy::new(device_props.memory.alignment as usize);
         let (mut utilities, captures) = ServerUtilities::init(
             cubecl_common::device::ServiceId::of::<Self>(device_id),
-            "cuda",
+            backend.runtime_name(),
             device_props,
             CudaRuntime::target_properties(),
             logger,
