@@ -85,8 +85,9 @@ pub struct PtxCacheEntry {
 ///
 /// Both backends emit PTX, so without the backend in the key a stale artifact from one would
 /// load and run happily under the other -- tests passing while measuring nothing.
-fn cache_namespace(fingerprint: &str, backend: CudaBackend) -> String {
+fn cache_namespace(fingerprint: &str, backend: CudaBackend, fast_math: bool) -> String {
     let backend = match backend {
+        CudaBackend::Cpp if fast_math => "cpp-fast-math",
         CudaBackend::Cpp => "cpp",
         CudaBackend::Llvm => "llvm",
     };
@@ -102,7 +103,11 @@ impl CudaContext {
         arch: CudaArchitecture,
         backend: CudaBackend,
     ) -> Self {
-        let fingerprint = cache_namespace(&format!("ptx_sm{}", arch.version), backend);
+        let fingerprint = cache_namespace(
+            &format!("ptx_sm{}", arch.version),
+            backend,
+            compilation_options.fast_math,
+        );
         let ptx_cache = compilation_store("cuda", &fingerprint);
         let second_line_ptx_cache = compilation_store("cuda-second-line", fingerprint);
 
@@ -380,6 +385,9 @@ impl CudaContext {
         let cccl_include_path = cccl_include_path();
         let cccl_include_option = format!("--include-path={}", cccl_include_path.to_str().unwrap());
         let mut options = vec![arch.as_str(), include_option.as_str(), "-lineinfo"];
+        if self.compilation_options.fast_math {
+            options.push("--use_fast_math");
+        }
         if cccl_include_path.exists() {
             options.push(&cccl_include_option);
         }
@@ -542,8 +550,20 @@ mod tests {
     #[test]
     fn cache_namespace_separates_backends() {
         assert_ne!(
-            super::cache_namespace("ptx_sm86", crate::compiler::CudaBackend::Cpp),
-            super::cache_namespace("ptx_sm86", crate::compiler::CudaBackend::Llvm),
+            super::cache_namespace("ptx_sm86", crate::compiler::CudaBackend::Cpp, false),
+            super::cache_namespace("ptx_sm86", crate::compiler::CudaBackend::Llvm, false),
+        );
+    }
+    #[test]
+    fn cache_namespace_separates_nvrtc_math_modes() {
+        use crate::compiler::CudaBackend;
+        assert_ne!(
+            super::cache_namespace("ptx_sm80", CudaBackend::Cpp, false),
+            super::cache_namespace("ptx_sm80", CudaBackend::Cpp, true)
+        );
+        assert_eq!(
+            super::cache_namespace("ptx_sm80", CudaBackend::Llvm, false),
+            super::cache_namespace("ptx_sm80", CudaBackend::Llvm, true)
         );
     }
 }

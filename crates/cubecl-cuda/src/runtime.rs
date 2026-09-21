@@ -36,7 +36,10 @@ use cubecl_cpp::{
     },
 };
 use cubecl_server::{
-    allocator::PitchedMemoryLayoutPolicy, logging::ServerLogger, runtime::Runtime,
+    allocator::PitchedMemoryLayoutPolicy,
+    config::{CubeClRuntimeConfig, RuntimeConfig},
+    logging::ServerLogger,
+    runtime::Runtime,
 };
 #[cfg(windows)]
 use cudarc::driver::sys::cuDeviceGetLuid;
@@ -358,7 +361,9 @@ impl DeviceService for CudaServer {
             restrict_to_llvm_backend(&mut device_props);
         }
 
+        let fast_math = CubeClRuntimeConfig::get().compilation.cuda_fast_math;
         let comp_opts = CudaCompilationOptions {
+            fast_math,
             cpp: comp_opts,
             arch: Some(SmArch::new(arch_version, arch.tensor_cores)),
         };
@@ -367,7 +372,7 @@ impl DeviceService for CudaServer {
         let policy = PitchedMemoryLayoutPolicy::new(device_props.memory.alignment as usize);
         let mut utilities = ServerUtilities::new(
             cubecl_common::device::ServiceId::of::<Self>(device_id),
-            backend.runtime_name(),
+            backend.runtime_name(fast_math),
             device_props,
             CudaRuntime::target_properties(),
             logger,
