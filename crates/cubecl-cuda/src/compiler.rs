@@ -20,6 +20,18 @@ pub enum CudaBackend {
     Llvm,
 }
 
+impl CudaBackend {
+    /// Runtime identity used by the client and persistent autotune namespace.
+    /// Compiler backends expose different capabilities and generate different
+    /// kernels, so a fastest-kernel choice cannot be shared between them.
+    pub(crate) fn runtime_name(self) -> &'static str {
+        match self {
+            Self::Cpp => "cuda-cpp",
+            Self::Llvm => "cuda-llvm",
+        }
+    }
+}
+
 impl Default for CudaBackend {
     fn default() -> Self {
         if cfg!(feature = "cpp") {
@@ -156,5 +168,23 @@ impl Compiler for CudaCompiler {
             CudaCompiler::Cpp(compiler) => compiler.lang_tag(),
             CudaCompiler::Llvm(compiler) => compiler.lang_tag(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CudaBackend;
+
+    #[test]
+    fn autotune_identity_separates_codegen_backends() {
+        // CubeTuneId includes the client name. The same device and candidate
+        // list must not reuse LLVM's scalar winner under C++ (or a C++ tensor
+        // core winner under an LLVM compiler lacking that instruction).
+        assert_ne!(
+            CudaBackend::Cpp.runtime_name(),
+            CudaBackend::Llvm.runtime_name()
+        );
+        assert_ne!(CudaBackend::Cpp.runtime_name(), "cuda");
+        assert_ne!(CudaBackend::Llvm.runtime_name(), "cuda");
     }
 }
