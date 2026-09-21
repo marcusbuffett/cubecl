@@ -50,11 +50,12 @@ impl DeviceHandleSpec for ReentrantMutexDeviceHandle {
 
     fn utilities(&self) -> ServerUtilitiesHandle {
         let state = self.lock.lock.lock();
+        self.ensure_initialized(&state);
         state
             .map
             .borrow()
             .get(&self.type_id)
-            .expect("Service not yet initialized — call init() before load()")
+            .expect("Service initialized above")
             .utilities
             .clone()
     }
@@ -157,6 +158,16 @@ impl ReentrantMutexDeviceHandle {
         }
     }
 
+    // Keep the device locked, but do not borrow the service map across init:
+    // constructing one service may initialize another service on this device.
+    fn ensure_initialized(&self, state: &DeviceStateMap) {
+        if state.map.borrow().contains_key(&self.type_id) {
+            return;
+        }
+        let service = (self.init)(self.device_id);
+        state.map.borrow_mut().insert(self.type_id, service);
+    }
+
     /// Acquires exclusive mutable access to the state and passes it to `f`.
     ///
     /// The same device can lock multiple types at the same time.
@@ -167,14 +178,15 @@ impl ReentrantMutexDeviceHandle {
     fn with_lock<R>(&self, f: impl FnOnce(&mut dyn Any) -> R) -> R {
         let key = self.type_id;
         let state = self.lock.lock.lock();
+        self.ensure_initialized(&state);
 
         // Take the entry out of the map. This gives us owned data with
         // no lifetime tied to the map borrow, so re-entrant calls for
         // different service types can access the map freely.
         let entry = {
             let mut map = state.map.borrow_mut();
-            map.entry(key)
-                .or_insert_with(|| (self.init)(self.device_id))
+            map.get_mut(&key)
+                .expect("Service initialized above")
                 .service
                 .take()
         };
@@ -356,5 +368,27 @@ mod tests {
                 });
             });
         });
+    }
+    struct DependentService;
+
+    impl DeviceService for DependentService {
+        fn init(device_id: DeviceId) -> Self {
+            let dependency = ReentrantMutexDeviceHandle::new::<Svc1>(device_id);
+            let _ = dependency.utilities();
+            Self
+        }
+        fn utilities(&self) -> ServerUtilitiesHandle {
+            Arc::new(())
+        }
+    }
+
+    #[test]
+    fn test_init_can_access_another_services_utilities() {
+        let context = crate::device::handle::DeviceFixture::new(
+            ReentrantMutexDeviceHandle::new::<DependentService>,
+            ReentrantMutexDeviceHandle::shutdown,
+        );
+        let _ = context.utilities();
+        assert_eq!(context.submit_blocking(|_| 42).unwrap(), 42);
     }
 }
