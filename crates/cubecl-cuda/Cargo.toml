@@ -23,6 +23,7 @@ default = [
     "cubecl-core/default",
 ]
 cpp = []
+cublas = ["cudarc/cublas"]
 pliron-dump = ["cubecl-cpp/pliron-dump", "cubecl-llvm/pliron-dump"]
 ptx-wmma = []
 persistence = ["cubecl-server/persistence"]

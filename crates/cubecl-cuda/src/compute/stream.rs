@@ -24,6 +24,8 @@ use std::{mem::MaybeUninit, sync::Arc};
 #[derive(Debug)]
 pub struct Stream {
     pub sys: cudarc::driver::sys::CUstream,
+    #[cfg(feature = "cublas")]
+    pub(crate) blas: Option<crate::blas::BlasHandle>,
     pub memory_management_gpu: MemoryManagement<GpuStorage>,
     pub memory_management_cpu: MemoryManagement<PinnedMemoryStorage>,
     pub drop_queue: drop_queue::PendingDropQueue<Fence>,
@@ -164,6 +166,8 @@ impl EventStreamBackend for CudaStreamBackend {
 
         Ok(Stream {
             sys: stream,
+            #[cfg(feature = "cublas")]
+            blas: None,
             memory_management_gpu,
             memory_management_cpu,
             drop_queue: Default::default(),

@@ -65,6 +65,7 @@ tracing = [
 cpu = ["cubecl-cpu"]
 cuda = ["cubecl-cuda"]
 cuda-cpp = ["cubecl-cuda?/cpp"]
+cuda-cublas = ["cuda", "cubecl-cuda/cublas"]
 cuda-ptx-wmma = ["cubecl-cuda?/ptx-wmma"]
 hip = ["cubecl-hip"]
 # Compile HIP kernels with the C++ backend instead of the default LLVM one.

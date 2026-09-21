@@ -2,6 +2,8 @@
 extern crate derive_new;
 extern crate alloc;
 
+#[cfg(feature = "cublas")]
+pub mod blas;
 pub mod compiler;
 mod compute;
 mod device;
