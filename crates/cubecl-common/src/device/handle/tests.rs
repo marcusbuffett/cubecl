@@ -81,3 +81,15 @@ impl<const T: usize> DeviceService for TestDeviceState<T> {
         Arc::new(())
     }
 }
+
+#[test]
+fn test_utilities_before_first_submission() {
+    let context = DeviceFixture::new(
+        DeviceHandle::<TestDeviceState<3>>::new,
+        DeviceHandle::<TestDeviceState<3>>::shutdown,
+    );
+    let first = context.utilities();
+    let second = context.utilities();
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(context.submit_blocking(|state| state.counter).unwrap(), 0);
+}
