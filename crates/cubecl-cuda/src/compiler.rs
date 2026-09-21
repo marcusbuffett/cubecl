@@ -25,8 +25,9 @@ impl CudaBackend {
     /// Runtime identity used by the client and persistent autotune namespace.
     /// Compiler backends expose different capabilities and generate different
     /// kernels, so a fastest-kernel choice cannot be shared between them.
-    pub(crate) fn runtime_name(self) -> &'static str {
+    pub(crate) fn runtime_name(self, fast_math: bool) -> &'static str {
         match self {
+            Self::Cpp if fast_math => "cuda-cpp-fast-math",
             Self::Cpp => "cuda-cpp",
             Self::Llvm => "cuda-llvm",
         }
@@ -71,6 +72,8 @@ impl Default for CudaCompiler {
 #[derive(Debug, Default, Clone)]
 pub struct CudaCompilationOptions {
     pub cpp: CompilationOptions,
+    /// Enable NVRTC approximate math; ignored by the LLVM backend.
+    pub fast_math: bool,
     /// The device, as the runtime read its compute capability.
     pub arch: Option<SmArch>,
     /// The newest PTX version the driver loads, which the LLVM backend emits.
@@ -185,10 +188,21 @@ mod tests {
         // list must not reuse LLVM's scalar winner under C++ (or a C++ tensor
         // core winner under an LLVM compiler lacking that instruction).
         assert_ne!(
-            CudaBackend::Cpp.runtime_name(),
-            CudaBackend::Llvm.runtime_name()
+            CudaBackend::Cpp.runtime_name(false),
+            CudaBackend::Llvm.runtime_name(false)
         );
-        assert_ne!(CudaBackend::Cpp.runtime_name(), "cuda");
-        assert_ne!(CudaBackend::Llvm.runtime_name(), "cuda");
+        assert_ne!(CudaBackend::Cpp.runtime_name(false), "cuda");
+        assert_ne!(CudaBackend::Llvm.runtime_name(false), "cuda");
+    }
+    #[test]
+    fn autotune_identity_separates_nvrtc_math_modes() {
+        assert_ne!(
+            CudaBackend::Cpp.runtime_name(false),
+            CudaBackend::Cpp.runtime_name(true)
+        );
+        assert_eq!(
+            CudaBackend::Llvm.runtime_name(false),
+            CudaBackend::Llvm.runtime_name(true)
+        );
     }
 }

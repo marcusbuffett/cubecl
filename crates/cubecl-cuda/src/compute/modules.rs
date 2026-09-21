@@ -47,6 +47,7 @@ impl CudaModules {
             &format!("ptx_sm{}", compiler.arch().version),
             backend,
             compiler.options().ptx_version,
+            compiler.options().fast_math,
         );
 
         Self {
@@ -140,13 +141,17 @@ impl CompilationTarget for CudaModules {
 /// Both backends emit PTX, so without the backend in the key a stale artifact from one would
 /// load and run happily under the other -- tests passing while measuring nothing. The LLVM
 /// backend's PTX version follows the driver, so it is in the key too: after a driver downgrade,
-/// PTX newer than the driver loads would otherwise be read back and refused.
+/// PTX newer than the driver loads would otherwise be read back and refused. NVRTC fast math
+/// changes the PTX a C++ source compiles to, so it separates the C++ namespace (both the kernel
+/// and the second-line source store); the LLVM backend ignores it.
 fn cache_namespace(
     fingerprint: &str,
     backend: CudaBackend,
     ptx_version: Option<PtxVersion>,
+    fast_math: bool,
 ) -> String {
     match (backend, ptx_version) {
+        (CudaBackend::Cpp, _) if fast_math => format!("{fingerprint}-cpp-fast-math"),
         (CudaBackend::Cpp, _) => format!("{fingerprint}-cpp"),
         (CudaBackend::Llvm, None) => format!("{fingerprint}-llvm"),
         (CudaBackend::Llvm, Some(ptx_version)) => format!("{fingerprint}-llvm-{ptx_version}"),
@@ -192,8 +197,20 @@ mod tests {
     #[test]
     fn cache_namespace_separates_backends() {
         assert_ne!(
-            cache_namespace("ptx_sm86", CudaBackend::Cpp, None),
-            cache_namespace("ptx_sm86", CudaBackend::Llvm, None),
+            cache_namespace("ptx_sm86", CudaBackend::Cpp, None, false),
+            cache_namespace("ptx_sm86", CudaBackend::Llvm, None, false),
+        );
+    }
+
+    #[test]
+    fn cache_namespace_separates_nvrtc_math_modes() {
+        assert_ne!(
+            cache_namespace("ptx_sm80", CudaBackend::Cpp, None, false),
+            cache_namespace("ptx_sm80", CudaBackend::Cpp, None, true)
+        );
+        assert_eq!(
+            cache_namespace("ptx_sm80", CudaBackend::Llvm, None, false),
+            cache_namespace("ptx_sm80", CudaBackend::Llvm, None, true)
         );
     }
 
@@ -201,8 +218,8 @@ mod tests {
     #[test]
     fn cache_namespace_separates_the_llvm_backends_ptx_versions() {
         assert_ne!(
-            cache_namespace("ptx_sm86", CudaBackend::Llvm, PtxVersion::for_driver(12080)),
-            cache_namespace("ptx_sm86", CudaBackend::Llvm, PtxVersion::for_driver(12090)),
+            cache_namespace("ptx_sm86", CudaBackend::Llvm, PtxVersion::for_driver(12080), false),
+            cache_namespace("ptx_sm86", CudaBackend::Llvm, PtxVersion::for_driver(12090), false),
         );
     }
 }

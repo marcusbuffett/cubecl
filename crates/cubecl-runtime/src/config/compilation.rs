@@ -10,6 +10,12 @@ pub struct CompilationConfig {
     #[serde(default)]
     #[cfg(persistence)]
     pub cache: bool,
+    /// Opt into NVRTC's fast single-precision math for the CUDA C++ backend.
+    /// Uses approximate division/sqrt/transcendentals and flushes subnormals to
+    /// zero. Other compiler backends ignore this. Set before creating a device;
+    /// compiled kernels and autotune choices use a separate cache namespace.
+    #[serde(default)]
+    pub cuda_fast_math: bool,
     /// Controls whether kernel launches enforce bounds checks.
     #[serde(default)]
     pub check_mode: BoundsCheckMode,

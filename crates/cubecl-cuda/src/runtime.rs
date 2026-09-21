@@ -421,7 +421,9 @@ impl DeviceService for CudaServer {
             restrict_features(&mut device_props, GpuTarget::Nvptx { arch: sm_arch });
         }
 
+        let fast_math = CubeClRuntimeConfig::get().compilation.cuda_fast_math;
         let comp_opts = CudaCompilationOptions {
+            fast_math,
             cpp: comp_opts,
             arch: Some(SmArch::new(arch_version, arch.tensor_cores)),
             ptx_version: PtxVersion::for_driver(driver_version),
@@ -448,7 +450,7 @@ impl DeviceService for CudaServer {
         let policy = PitchedMemoryLayoutPolicy::new(device_props.memory.alignment as usize);
         let (mut utilities, captures) = ServerUtilities::init(
             cubecl_common::device::ServiceId::of::<Self>(device_id),
-            backend.runtime_name(),
+            backend.runtime_name(fast_math),
             device_props,
             CudaRuntime::target_properties(),
             logger,

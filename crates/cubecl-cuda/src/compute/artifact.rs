@@ -286,6 +286,9 @@ impl CudaArtifactCompiler {
         let cccl_include_path = cccl_include_path();
         let cccl_include_option = format!("--include-path={}", cccl_include_path.to_str().unwrap());
         let mut options = vec![arch.as_str(), include_option.as_str(), "-lineinfo"];
+        if self.options.fast_math {
+            options.push("--use_fast_math");
+        }
         if cccl_include_path.exists() {
             options.push(&cccl_include_option);
         }
@@ -310,6 +313,9 @@ impl CudaArtifactCompiler {
                         format!("--gpu-architecture=sm_{}a", (self.arch.version / 10) * 10);
                     let mut fallback_opts =
                         vec![major_arch.as_str(), include_option.as_str(), "-lineinfo"];
+                    if self.options.fast_math {
+                        fallback_opts.push("--use_fast_math");
+                    }
                     if cccl_include_path.exists() {
                         fallback_opts.push(&cccl_include_option);
                     }
