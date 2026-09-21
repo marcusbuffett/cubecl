@@ -12,11 +12,22 @@ use cubecl_server::{
 };
 use cudarc::cublas::{result, sys};
 
-/// Row-major FP32 output `C = A @ B`, with FP32 accumulation and TF32 products.
+/// Product precision for a GEMM with FP32 inputs, output and accumulation.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum GemmPrecision {
+    /// TF32 tensor-core products (10 fraction bits).
+    Tf32,
+    /// BF16 tensor-core products (7 fraction bits); explicitly reduced precision.
+    Bf16,
+}
+
+/// Row-major FP32 output `C = A @ B`, with FP32 accumulation.
 /// Transposed operands use column-major storage; leading dimensions and batch
 /// strides are expressed in elements. Buffers are managed by the calling client.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct Gemm {
+    /// Precision permitted for multiplication; storage and accumulation stay FP32.
+    pub precision: GemmPrecision,
     /// Logical output rows.
     pub m: i32,
     /// Logical output columns.
@@ -47,7 +58,10 @@ pub(crate) struct GemmKernel(pub Gemm);
 
 impl KernelMetadata for GemmKernel {
     fn name(&self) -> &'static str {
-        "cublas_tf32_gemm"
+        match self.0.precision {
+            GemmPrecision::Tf32 => "cublas_tf32_gemm",
+            GemmPrecision::Bf16 => "cublas_bf16_gemm",
+        }
     }
     fn id(&self) -> KernelId {
         KernelId::new::<Self>().info(self.0)
@@ -118,6 +132,10 @@ impl BlasHandle {
             }
         };
         let (alpha, beta) = (1.0_f32, 0.0_f32);
+        let compute = match g.precision {
+            GemmPrecision::Tf32 => sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32,
+            GemmPrecision::Bf16 => sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_16BF,
+        };
         // Row-major C is column-major C^T: swap A/B and M/N. The library reads
         // host alpha/beta during this call; the actual GEMM stays asynchronous.
         // SAFETY: the caller resolved live buffer bindings on this handle's
@@ -142,7 +160,7 @@ impl BlasHandle {
                     c as _,
                     sys::cudaDataType::CUDA_R_32F,
                     g.out_leading,
-                    sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32,
+                    compute,
                     sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP,
                 )
                 .map_err(error);
@@ -169,7 +187,7 @@ impl BlasHandle {
                 g.out_leading,
                 g.out_batch_stride,
                 g.batches,
-                sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32,
+                compute,
                 sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP,
             )
             .map_err(error)
