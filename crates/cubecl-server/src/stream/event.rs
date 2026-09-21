@@ -373,8 +373,14 @@ impl<B: EventStreamBackend> MultiStream<B> {
 
         let mut analysis = SharedBindingAnalysis::default();
 
-        // We only consider handles whose stream is different from the current stream.
-        for handle in handles.filter(|handle| handle.stream != stream_id) {
+        // Logical stream IDs can alias one physical queue. That queue already
+        // orders both accesses and allocator reuse, so neither a dependency
+        // event nor a cross-stream lifetime pin is needed for aliases.
+        let max_streams = self.max_streams;
+        let current_index = stream_index(&stream_id, max_streams);
+        for handle in
+            handles.filter(|handle| stream_index(&handle.stream, max_streams) != current_index)
+        {
             let index = stream_index(&handle.stream, self.max_streams);
             // SAFETY: `stream_index` keeps the index within the regular streams.
             let stream = unsafe { self.streams.get_or_create_index(index) }?;
@@ -535,6 +541,31 @@ mod tests {
     }
 
     const MAX_STREAMS: u8 = 4;
+
+    #[test_log::test]
+    fn logical_stream_aliases_need_no_wait_or_lifetime_pin() {
+        let logger = Arc::new(ServerLogger::default());
+        let current = StreamId { value: 1 };
+        let alias = StreamId {
+            value: 1 + MAX_STREAMS as u64,
+        };
+        let binding = handle(alias);
+        let mut streams = MultiStream::new(logger, TestBackend, MAX_STREAMS);
+        streams.resolve(current, [].into_iter()).unwrap();
+        streams.resolve(alias, [].into_iter()).unwrap();
+
+        let analysis = streams
+            .update_shared_bindings(current, [&binding].into_iter())
+            .unwrap();
+        assert!(
+            analysis.slices.is_empty(),
+            "same physical stream is already ordered"
+        );
+        assert!(
+            analysis.pinned.is_empty(),
+            "same-stream allocation reuse follows queue order"
+        );
+    }
 
     #[test_log::test]
     fn test_analysis_shared_bindings_1() {
