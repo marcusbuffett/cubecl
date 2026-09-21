@@ -1,0 +1,184 @@
+//! Optional cuBLAS GEMM submitted through `CubeCL`'s stream and failure tracking.
+use cubecl_core::{
+    client::Client,
+    ir::{ElemType, UIntKind},
+    server::{BufferBinding, CubeCount, KernelArguments},
+};
+use cubecl_environment::backtrace::BackTrace;
+use cubecl_server::{
+    id::KernelId,
+    kernel::{BufferIOAttr, CubeKernel, KernelDefinition, KernelMetadata},
+    server::{LaunchError, ServerError},
+};
+use cudarc::cublas::{result, sys};
+
+/// Row-major FP32 output `C = A @ B`, with FP32 accumulation and TF32 products.
+/// Transposed operands use column-major storage; leading dimensions and batch
+/// strides are expressed in elements. Buffers are managed by the calling client.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct Gemm {
+    /// Logical output rows.
+    pub m: i32,
+    /// Logical output columns.
+    pub n: i32,
+    /// Contracted dimension.
+    pub k: i32,
+    /// Number of independent matrices.
+    pub batches: i32,
+    /// Whether A is stored column-major.
+    pub lhs_transposed: bool,
+    /// Whether B is stored column-major.
+    pub rhs_transposed: bool,
+    /// Physical leading dimension of A.
+    pub lhs_leading: i32,
+    /// Physical leading dimension of B.
+    pub rhs_leading: i32,
+    /// Row stride of C.
+    pub out_leading: i32,
+    /// Element offset between A matrices.
+    pub lhs_batch_stride: i64,
+    /// Element offset between B matrices.
+    pub rhs_batch_stride: i64,
+    /// Element offset between C matrices.
+    pub out_batch_stride: i64,
+}
+
+pub(crate) struct GemmKernel(pub Gemm);
+
+impl KernelMetadata for GemmKernel {
+    fn name(&self) -> &'static str {
+        "cublas_tf32_gemm"
+    }
+    fn id(&self) -> KernelId {
+        KernelId::new::<Self>().info(self.0)
+    }
+    fn address_type(&self) -> ElemType {
+        ElemType::UInt(UIntKind::U32)
+    }
+}
+impl CubeKernel for GemmKernel {
+    fn define(&self) -> KernelDefinition {
+        panic!("cuBLAS GEMM must be submitted to a CUDA client")
+    }
+}
+
+impl Gemm {
+    /// Submit a GEMM on the client's current stream without a host synchronization.
+    ///
+    /// # Safety
+    /// The descriptors must describe valid FP32 matrices in these bindings. Output
+    /// storage must not overlap either input or another output batch. All bindings
+    /// must belong to this CUDA client and remain valid through the queued launch.
+    pub unsafe fn launch(
+        self,
+        client: &Client,
+        lhs: BufferBinding,
+        rhs: BufferBinding,
+        out: BufferBinding,
+    ) {
+        assert!(client.name().starts_with("cuda-"), "cuBLAS requires CUDA");
+        let bindings = KernelArguments::new()
+            .with_buffer_io(lhs, BufferIOAttr::ReadOnly)
+            .with_buffer_io(rhs, BufferIOAttr::ReadOnly)
+            .with_buffer_io(out, BufferIOAttr::WriteOnly);
+        client.launch(
+            Box::new(GemmKernel(self)),
+            CubeCount::Static(1, 1, 1),
+            bindings,
+        );
+    }
+}
+
+fn error(reason: impl core::fmt::Debug) -> ServerError {
+    LaunchError::Unknown {
+        reason: format!("cuBLAS: {reason:?}"),
+        backtrace: BackTrace::capture(),
+    }
+    .into()
+}
+
+/// One handle per `CubeCL` stream, never reset or shared across concurrent streams.
+#[derive(Debug)]
+pub(crate) struct BlasHandle(sys::cublasHandle_t);
+impl BlasHandle {
+    pub(crate) fn new(stream: cudarc::driver::sys::CUstream) -> Result<Self, ServerError> {
+        let handle = Self(result::create_handle().map_err(error)?);
+        // SAFETY: the new handle and the owning CubeCL stream are live.
+        unsafe {
+            result::set_stream(handle.0, stream as _).map_err(error)?;
+        }
+        Ok(handle)
+    }
+    pub(crate) unsafe fn gemm(&self, g: Gemm, a: u64, b: u64, c: u64) -> Result<(), ServerError> {
+        let op = |transpose| {
+            if transpose {
+                sys::cublasOperation_t::CUBLAS_OP_T
+            } else {
+                sys::cublasOperation_t::CUBLAS_OP_N
+            }
+        };
+        let (alpha, beta) = (1.0_f32, 0.0_f32);
+        // Row-major C is column-major C^T: swap A/B and M/N. The library reads
+        // host alpha/beta during this call; the actual GEMM stays asynchronous.
+        // SAFETY: the caller resolved live buffer bindings on this handle's
+        // stream and the launch contract requires valid, nonaliasing matrices.
+        unsafe {
+            if g.batches == 1 {
+                return result::gemm_ex(
+                    self.0,
+                    op(g.rhs_transposed),
+                    op(g.lhs_transposed),
+                    g.n,
+                    g.m,
+                    g.k,
+                    (&alpha as *const f32).cast(),
+                    b as _,
+                    sys::cudaDataType::CUDA_R_32F,
+                    g.rhs_leading,
+                    a as _,
+                    sys::cudaDataType::CUDA_R_32F,
+                    g.lhs_leading,
+                    (&beta as *const f32).cast(),
+                    c as _,
+                    sys::cudaDataType::CUDA_R_32F,
+                    g.out_leading,
+                    sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32,
+                    sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP,
+                )
+                .map_err(error);
+            }
+            result::gemm_strided_batched_ex(
+                self.0,
+                op(g.rhs_transposed),
+                op(g.lhs_transposed),
+                g.n,
+                g.m,
+                g.k,
+                (&alpha as *const f32).cast(),
+                b as _,
+                sys::cudaDataType::CUDA_R_32F,
+                g.rhs_leading,
+                g.rhs_batch_stride,
+                a as _,
+                sys::cudaDataType::CUDA_R_32F,
+                g.lhs_leading,
+                g.lhs_batch_stride,
+                (&beta as *const f32).cast(),
+                c as _,
+                sys::cudaDataType::CUDA_R_32F,
+                g.out_leading,
+                g.out_batch_stride,
+                g.batches,
+                sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32,
+                sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP,
+            )
+            .map_err(error)
+        }
+    }
+}
+impl Drop for BlasHandle {
+    fn drop(&mut self) {
+        // SAFETY: the handle is owned only here and destroyed once on the server.
+        let _ = unsafe { result::destroy_handle(self.0) };
+    }
+}

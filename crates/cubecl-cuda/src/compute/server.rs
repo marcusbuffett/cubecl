@@ -178,6 +178,25 @@ impl Server for CudaServer {
         stream_id: StreamId,
         launch_mode: LaunchMode,
     ) {
+        #[cfg(feature = "cublas")]
+        if let Some(gemm) =
+            (&*kernel as &dyn core::any::Any).downcast_ref::<crate::blas::GemmKernel>()
+        {
+            if !launch_mode.is_skipped() {
+                let gemm = gemm.0;
+                let mut written = self.write_set();
+                written.extend(bindings.buffers_written(None).cloned());
+                ExecuteScope::launching(
+                    self,
+                    kernel.id(),
+                    stream_id,
+                    bindings.buffers_read(None),
+                    written,
+                )
+                .execute(|server| server.launch_blas(gemm, bindings, stream_id));
+            }
+            return;
+        }
         let kernel_id = kernel.id();
         if self.compile_failed(&kernel_id, kernel, &bindings, stream_id, launch_mode) {
             return;
@@ -845,6 +864,41 @@ impl CudaServer {
                 );
                 Ok((data[0], data[1], data[2]))
             }
+        }
+    }
+
+    #[cfg(feature = "cublas")]
+    fn launch_blas(
+        &mut self,
+        gemm: crate::blas::Gemm,
+        bindings: KernelArguments,
+        stream_id: StreamId,
+    ) -> Result<(), ServerError> {
+        let mut command = self.command(stream_id, bindings.buffers());
+        let mut pointers = Vec::with_capacity(3);
+        for binding in bindings.buffers() {
+            pointers.push(command.resource(binding.clone())?.ptr);
+        }
+        assert_eq!(pointers.len(), 3);
+        let stream = command.stream();
+        if stream.capturing.is_recording() {
+            return Err(LaunchError::Unknown {
+                reason: "cuBLAS GEMM graph capture is not supported by this optional path".into(),
+                backtrace: BackTrace::capture(),
+            }
+            .into());
+        }
+        if stream.blas.is_none() {
+            stream.blas = Some(crate::blas::BlasHandle::new(stream.sys)?);
+        }
+        // SAFETY: resource resolution also orders prior writes against this stream.
+        // The unsafe GEMM launch contract supplies valid nonaliasing dimensions.
+        unsafe {
+            stream
+                .blas
+                .as_ref()
+                .unwrap()
+                .gemm(gemm, pointers[0], pointers[1], pointers[2])
         }
     }
 
