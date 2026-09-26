@@ -90,7 +90,7 @@ embassy-time = { version = "0.5", default-features = false }
 etcetera = "0.11.0"
 js-sys = "0.3"
 parking_lot = { version = "0.12.5", default-features = false }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 sanitize-filename = "0.6"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4.45"
