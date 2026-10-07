@@ -509,6 +509,9 @@ impl ServerCommunication for CudaServer {
         self.streams.ensure_written([&desc.handle].into_iter())?;
 
         let binding = desc.handle.clone();
+        // Count from the tensor's own byte range, not its pool slice (see
+        // `reduce_checked`).
+        let bytes = binding.size_in_used();
 
         // A command on the source server retrieves the resource from the right
         // memory pool, and aligns the current stream with the one the binding
@@ -524,7 +527,7 @@ impl ServerCommunication for CudaServer {
         let (peers, comm_id) = pair(self.device_id, device_id_dst);
         let comm = self.collectives.get(&comm_id)?;
         let peer = self.collectives.peer_rank(&peers)?;
-        let (nccl_dtype, count) = Cuda::data_type(dtype, resource.size)?;
+        let (nccl_dtype, count) = Cuda::data_type(dtype, bytes)?;
 
         Cuda::send(comm, &resource, nccl_dtype, count, peer, self.comm_stream)
     }
@@ -707,17 +710,35 @@ impl CudaServer {
             });
         }
 
+        // The element count comes from the tensor's own byte range. The
+        // storage resource spans the whole pool slice from the tensor's start:
+        // the slice is rounded up by its pool (by how much depends on each
+        // device's allocation history), and a tensor carved from a shared
+        // allocation sees its siblings after it. Sized from the resource, ranks
+        // disagreed on the count (NCCL waited forever) or reduced into the
+        // neighbours (corrupted weights).
+        let bytes = src.size_in_used();
+        if dst.size_in_used() != bytes {
+            return Err(ServerError::Generic {
+                reason: format!(
+                    "all_reduce: source ({bytes} B) and destination ({} B) differ in size",
+                    dst.size_in_used()
+                ),
+                backtrace: BackTrace::capture(),
+            });
+        }
         let mut command = self.command(stream_id, [&src, &dst].into_iter());
         let resource_src = command.resource(src)?;
         let resource_dst = command.resource(dst)?;
         let stream = command.stream().sys;
         drop(command);
+        debug_assert!(bytes <= resource_src.size, "binding larger than its storage");
 
         // Wait for the data to be ready on the compute stream.
         Fence::new(stream).wait_async(self.comm_stream);
 
         let comm = self.collectives.get(&CommunicationId::from(device_ids))?;
-        let (nccl_dtype, count) = Cuda::data_type(dtype, resource_src.size)?;
+        let (nccl_dtype, count) = Cuda::data_type(dtype, bytes)?;
 
         Cuda::all_reduce(
             comm,
@@ -750,13 +771,14 @@ impl CudaServer {
         let mut command_dst = self.command_no_inputs(stream_id);
         let memory = command_dst.reserve(handle.size())?;
         command_dst.bind(memory, handle.memory.clone())?;
+        let bytes = handle.size_in_used();
         let resource_dst = command_dst.resource(handle.binding())?;
         drop(command_dst);
 
         let (peers, comm_id) = pair(self.device_id, device_id_src);
         let comm = self.collectives.get(&comm_id)?;
         let peer = self.collectives.peer_rank(&peers)?;
-        let (nccl_dtype, count) = Cuda::data_type(dtype, resource_dst.size)?;
+        let (nccl_dtype, count) = Cuda::data_type(dtype, bytes)?;
 
         Cuda::recv(
             comm,

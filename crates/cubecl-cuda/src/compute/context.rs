@@ -316,9 +316,13 @@ impl CudaContext {
                 log::trace!("Using second-line PTX cache");
                 store_compiled(cache, key, entry);
                 store_compiled(second_line_cache, cpp_hash, key);
-                self.try_load_cached(kernel_id)?
-                    .expect("Should be cached now");
-                return Ok(());
+                match self.try_load_cached(kernel_id)? {
+                    Ok(()) => return Ok(()),
+                    // Every device context of a process opens its own store on
+                    // the same cache file, so another device can race the entry
+                    // away between the store and this load. Compile it instead.
+                    Err(_) => log::debug!("second-line PTX entry raced away; compiling"),
+                }
             }
 
             Some(cpp_hash)
