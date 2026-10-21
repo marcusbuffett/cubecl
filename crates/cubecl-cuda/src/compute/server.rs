@@ -686,6 +686,11 @@ impl ServerCommunication for CudaServer {
         self.streams.ensure_written([&desc.handle].into_iter())?;
 
         let binding = desc.handle.clone();
+        // Count from the tensor's own byte range, as the collectives do: the
+        // resource spans the rest of its pool slice, rounded up by the pool by
+        // however much each device's allocation history decided, so a count
+        // from it disagrees with the receiver's.
+        let size = binding.size_in_used();
 
         // A command on the source server retrieves the resource from the right
         // memory pool, and aligns the current stream with the one the binding
@@ -696,7 +701,8 @@ impl ServerCommunication for CudaServer {
 
         // Wait for the data to be ready on the compute stream.
         Fence::new(stream).wait_async(transfers)?;
-        let bytes = Cuda::elements(BYTES, resource.size)?;
+        debug_assert!(size <= resource.size, "binding larger than its storage");
+        let bytes = Cuda::elements(BYTES, size)?;
         Cuda::send(&comm, &resource, bytes, peer, transfers)?;
         // This stream's pool may reuse the source from here, and dropping the command releases one
         // borrowed from another stream once this stream gets here: both wait for the send.
@@ -987,6 +993,9 @@ impl CudaServer {
         let mut command_dst = self.command_no_inputs(stream_id)?;
         let memory = command_dst.reserve(handle.size())?;
         command_dst.bind(memory, handle.memory.clone())?;
+        // Counted from the handle's own bytes, not the reserved slice the pool
+        // rounded up; see `all_gather`.
+        let size = handle.size_in_used();
         let resource_dst = command_dst.resource(handle.binding())?;
         let stream = command_dst.stream().sys;
         drop(command_dst);
@@ -995,7 +1004,8 @@ impl CudaServer {
         // queued after it reads what arrives.
         let transfers = self.transfer_stream();
         Fence::new(stream).wait_async(transfers)?;
-        let bytes = Cuda::elements(BYTES, resource_dst.size)?;
+        debug_assert!(size <= resource_dst.size, "handle larger than its storage");
+        let bytes = Cuda::elements(BYTES, size)?;
         Cuda::recv(&comm, &resource_dst, bytes, peer, transfers)?;
         Fence::new(transfers).wait_async(stream)?;
         Ok(())
