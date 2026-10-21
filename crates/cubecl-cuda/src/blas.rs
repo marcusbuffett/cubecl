@@ -19,9 +19,11 @@ pub enum GemmPrecision {
     Tf32,
     /// BF16 tensor-core products (7 fraction bits); explicitly reduced precision.
     Bf16,
+    /// FP16 inputs and output with FP32 accumulation (FP16 serving models).
+    F16,
 }
 
-/// Row-major FP32 output `C = A @ B`, with FP32 accumulation.
+/// Row-major output `C = A @ B` (FP32, or FP16 with `GemmPrecision::F16`), with FP32 accumulation.
 /// Transposed operands use column-major storage; leading dimensions and batch
 /// strides are expressed in elements. Buffers are managed by the calling client.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -61,6 +63,7 @@ impl KernelMetadata for GemmKernel {
         match self.0.precision {
             GemmPrecision::Tf32 => "cublas_tf32_gemm",
             GemmPrecision::Bf16 => "cublas_bf16_gemm",
+            GemmPrecision::F16 => "cublas_f16_gemm",
         }
     }
     fn id(&self) -> KernelId {
@@ -111,15 +114,26 @@ fn error(reason: impl core::fmt::Debug) -> ServerError {
     .into()
 }
 
+/// cuBLAS scratch per handle. A handle given its own workspace never
+/// allocates during a GEMM, which is what lets GEMMs be recorded into a CUDA
+/// graph (an allocation inside a capture window invalidates it).
+const WORKSPACE_BYTES: usize = 32 << 20;
+
 /// One handle per `CubeCL` stream, never reset or shared across concurrent streams.
 #[derive(Debug)]
-pub(crate) struct BlasHandle(sys::cublasHandle_t);
+pub(crate) struct BlasHandle(sys::cublasHandle_t, cudarc::driver::sys::CUdeviceptr);
 impl BlasHandle {
     pub(crate) fn new(stream: cudarc::driver::sys::CUstream) -> Result<Self, ServerError> {
-        let handle = Self(result::create_handle().map_err(error)?);
-        // SAFETY: the new handle and the owning CubeCL stream are live.
+        // SAFETY: the context is current on the server thread creating the handle.
+        let workspace = unsafe { cudarc::driver::result::malloc_sync(WORKSPACE_BYTES) }.map_err(error)?;
+        let handle = Self(result::create_handle().map_err(error)?, workspace);
+        // SAFETY: the new handle, its workspace and the owning CubeCL stream are live.
         unsafe {
             result::set_stream(handle.0, stream as _).map_err(error)?;
+            let status = sys::cublasSetWorkspace_v2(handle.0, workspace as _, WORKSPACE_BYTES);
+            if status != sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+                return Err(error(status));
+            }
         }
         Ok(handle)
     }
@@ -135,6 +149,11 @@ impl BlasHandle {
         let compute = match g.precision {
             GemmPrecision::Tf32 => sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32,
             GemmPrecision::Bf16 => sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_16BF,
+            GemmPrecision::F16 => sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+        };
+        let storage = match g.precision {
+            GemmPrecision::F16 => sys::cudaDataType::CUDA_R_16F,
+            GemmPrecision::Tf32 | GemmPrecision::Bf16 => sys::cudaDataType::CUDA_R_32F,
         };
         // Row-major C is column-major C^T: swap A/B and M/N. The library reads
         // host alpha/beta during this call; the actual GEMM stays asynchronous.
@@ -151,14 +170,14 @@ impl BlasHandle {
                     g.k,
                     (&alpha as *const f32).cast(),
                     b as _,
-                    sys::cudaDataType::CUDA_R_32F,
+                    storage,
                     g.rhs_leading,
                     a as _,
-                    sys::cudaDataType::CUDA_R_32F,
+                    storage,
                     g.lhs_leading,
                     (&beta as *const f32).cast(),
                     c as _,
-                    sys::cudaDataType::CUDA_R_32F,
+                    storage,
                     g.out_leading,
                     compute,
                     sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP,
@@ -174,16 +193,16 @@ impl BlasHandle {
                 g.k,
                 (&alpha as *const f32).cast(),
                 b as _,
-                sys::cudaDataType::CUDA_R_32F,
+                storage,
                 g.rhs_leading,
                 g.rhs_batch_stride,
                 a as _,
-                sys::cudaDataType::CUDA_R_32F,
+                storage,
                 g.lhs_leading,
                 g.lhs_batch_stride,
                 (&beta as *const f32).cast(),
                 c as _,
-                sys::cudaDataType::CUDA_R_32F,
+                storage,
                 g.out_leading,
                 g.out_batch_stride,
                 g.batches,
@@ -198,5 +217,7 @@ impl Drop for BlasHandle {
     fn drop(&mut self) {
         // SAFETY: the handle is owned only here and destroyed once on the server.
         let _ = unsafe { result::destroy_handle(self.0) };
+        // SAFETY: allocated in `new` for this handle only, which is now gone.
+        let _ = unsafe { cudarc::driver::result::free_sync(self.1) };
     }
 }

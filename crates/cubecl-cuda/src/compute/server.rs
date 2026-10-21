@@ -1120,9 +1120,12 @@ impl CudaServer {
         }
         assert_eq!(pointers.len(), 3);
         let stream = command.stream();
-        if stream.capturing.is_recording() {
+        // Creating the handle allocates its workspace, which a capture window
+        // forbids; a warmup run before the capture creates it.
+        if stream.capturing.is_recording() && stream.blas.is_none() {
             return Err(LaunchError::Unknown {
-                reason: "cuBLAS GEMM graph capture is not supported by this optional path".into(),
+                reason: "first cuBLAS GEMM on a stream inside a capture window; warm up first"
+                    .into(),
                 backtrace: BackTrace::capture(),
             }
             .into());
